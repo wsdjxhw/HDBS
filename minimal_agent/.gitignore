@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.env
+logs/
+sessions/
+.pytest_cache/
+docs/ai-log.md
