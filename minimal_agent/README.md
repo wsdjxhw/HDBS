@@ -9,13 +9,13 @@
 |---|---|
 | 基本循环(接收输入→判断→调工具→继续/返回) | `agent/runtime.py` |
 | 三个工具 calculator / search(mock) / weather(mock) | `agent/tools.py` |
-| 工具注册机制(名称+描述+参数 Schema) | `agent/tools.py` 的 `ToolRegistry`,schema 经 `schemas_text()` 渲染进 system prompt |
+| 工具注册机制(名称+描述+参数 Schema) | `agent/tools.py`:schema 渲染进 system prompt(给 LLM 看)+ 执行前 `validate_args` 校验必填/类型——schema 是契约,不只是提示词 |
 | LLM 输出解析(思考过程/工具调用/最终答案) | `agent/parser.py`,自定义 JSON 协议 |
 | session 管理(多窗口独立、可随时接着聊) | `agent/context.py`,每窗口一个 Session,JSON 落盘,重启可续 |
-| context 管理(轮次限制、追问、超长压缩) | `agent/runtime.py`(max_rounds)+ `agent/context.py`(compress_if_needed) |
+| context 管理(轮次限制、追问、超长压缩) | `agent/runtime.py`(max_rounds)+ `agent/context.py` 结构感知压缩:输出永远是合法 JSON,被丢弃轮次以摘要替代 |
 | 基本异常处理 | LLM 网络错误友好提示;工具层"永不抛异常",错误作为字符串塞回 context |
-| 工具调用 trace / 执行日志 | `logging` 输出每轮 thought / action / 耗时 / 结果摘要,落 `logs/agent.log` |
-| 测试用例 | `tests/` 30 个用例,FakeLLM 跑完整循环,不依赖真实 API |
+| 工具调用 trace / 执行日志 | `logging` 输出每轮 thought / action / 耗时 / 结果摘要(outcome=OK/ERROR),落 `logs/agent.log` |
+| 测试用例 | `tests/` 37 个用例,FakeLLM 跑完整循环,不依赖真实 API |
 
 ## 快速开始
 
@@ -73,8 +73,12 @@ Tool(name, description, parameters) ──register──▶ ToolRegistry(字典)
                                              system prompt(每次请求都带)
 ```
 
-执行层"永不抛异常":工具不存在、参数不匹配、内部崩溃(如除零),一律返回错误 JSON 字符串,
+执行层"永不抛异常":工具不存在、参数校验失败、内部崩溃(如除零),一律返回错误 JSON 字符串,
 作为工具结果塞回 context——**错误也是上下文**,LLM 下一轮自己修正(重试或换路)。
+
+runtime 同时是工具结果的**第一读者**:每轮解析结果、识别 error 分支(单独计数与 trace 标注,
+`meta.ok` 留痕),并对**同名同参的连续重复调用**做卡死拦截(第 3 次起不再执行,返回合成
+纠正结果喂回 context,不烧轮次、不重复副作用)。
 
 ### Session 与 context 管理
 
@@ -82,10 +86,15 @@ Tool(name, description, parameters) ──register──▶ ToolRegistry(字典)
 - **召回与放置**(memory 说明):
   - *召回时机*:每次调 LLM 前,把该 session 的全部历史(经压缩)拼进 messages;session 文件在 `--session` 启动时按名加载——**按 session 名精确召回,不做相似度检索**。对一个 CLI agent,精确召回是最合适的粒度;RAG 式语义召回适合海量历史,这里引入只增加复杂度。
   - *放置方式*:`system(含工具 schema 与协议) + 完整历史`,工具结果以 `[工具结果]` 前缀的 user 消息呈现(不依赖原生 tool 角色,任何兼容端点都能跑)。system prompt 每次请求都完整携带。
-- **压缩**(基础版,触发于发给 LLM 前超过 8000 字符):① 从旧到新截断工具结果(时效性最弱、体积最大)→ ② 截断旧 assistant 输出 → ③ 丢弃最旧消息但**保住第一条 user**(它通常承载本次会话目标),并插入省略提示。session 内永远保留完整原文,压缩只发生在"发送视图"上。
+- **压缩**(**结构感知**,触发于发给 LLM 前超过 8000 字符):① 旧工具结果按 JSON 字段
+  截断后**重新序列化**——进 context 的永远是合法 JSON,绝不产生残缺片段污染协议
+  (LLM 的历史就是它的 few-shot 示例);② 旧 assistant 输出只保留 thought 与动作标记
+  (历史的价值在"格式正确"这个示范,内容可丢);③ 仍超预算则丢弃最旧轮次,但**保住
+  第一条 user**(承载会话目标),被丢弃的轮次以一行规则摘要替代——基础的分层记忆
+  (摘要层+原文层)。session 内永远保留完整原文,压缩只发生在"发送视图"上。
 - **轮次限制**:单次任务最多 8 轮,防失控;追问时历史仍在,支持纯对话追问与带工具结果追问。
 
 ## 已知限制
 
-- 压缩是规则式的,没有 LLM 摘要(题目说明复杂压缩不必实现)
+- 压缩的摘要层是规则式一行摘要,未用 LLM 生成语义摘要(题目说明复杂压缩不必实现);预算按字符数而非 token
 - search / weather 为 mock;无并发与速率控制;单用户 CLI 形态

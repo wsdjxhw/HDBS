@@ -94,6 +94,24 @@ class Search(Tool):
         )
 
 
+def validate_args(schema: dict, args: dict) -> str | None:
+    """按 schema 校验参数(本项目的简化 schema 中,每个字段都是必填)。
+
+    schema 是契约而不只是提示词:渲染进 system prompt 是"告诉 LLM 怎么传",
+    执行前校验是"不合法就不执行"。合法返回 None,非法返回给 LLM 看的错误说明。
+    """
+    for pname, spec in schema.items():
+        if pname not in args:
+            return f"缺少必填参数 '{pname}'({spec.get('description', '')})"
+        value, expect = args[pname], spec.get("type")
+        # 注意:Python 里 bool 是 int 的子类,必须显式排除,否则 num1=true 能混过 number 校验
+        if expect == "string" and not isinstance(value, str):
+            return f"参数 '{pname}' 应为 string,实际是 {type(value).__name__}"
+        if expect == "number" and (isinstance(value, bool) or not isinstance(value, (int, float))):
+            return f"参数 '{pname}' 应为 number,实际是 {type(value).__name__}"
+    return None
+
+
 class ToolRegistry:
     def __init__(self):
         self.tools = {}   # name -> Tool 实例
@@ -115,9 +133,15 @@ class ToolRegistry:
                 ensure_ascii=False,
             )
         try:
+            error = validate_args(tool.parameters, args)   # 契约闸门:不合法就不执行
+            if error:
+                return json.dumps(
+                    {"error": f"参数校验失败: {error}", "expect": tool.parameters},
+                    ensure_ascii=False,
+                )
             return str(tool.execute(**args))
         except TypeError as e:
-            # 参数名/数量不匹配:把期望的 schema 一起告诉 LLM,让它自己改
+            # 防御:多传了 schema 之外的参数名等(校验已拦必填/类型,这里兜底形状不匹配)
             return json.dumps(
                 {"error": f"参数不匹配: {e}", "expect": tool.parameters},
                 ensure_ascii=False,

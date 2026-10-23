@@ -103,3 +103,25 @@ def test_context_sent_with_system_prompt():
     first = llm.sent[0]
     assert first[0]["role"] == "system"
     assert "weather" in first[0]["content"] and "calculator" in first[0]["content"]
+
+
+def test_tool_error_branch_interpreted():
+    """runtime 解读结果:调了不存在的工具,error 结果带 ok=False 留痕,循环不崩。"""
+    bad = json.dumps({"thought": "试试", "action": {"name": "nope", "args": {}}}, ensure_ascii=False)
+    agent, _ = make_agent([bad, ANSWER_JSON])
+    out = agent.run("hi")
+    assert out == "广州今天晴。"
+    tool_msgs = [m for m in agent.session.messages if m.role == "tool"]
+    assert tool_msgs[0].meta["ok"] is False                   # 错误分支被识别并留痕
+    assert agent.tool_errors == 1
+
+
+def test_stuck_loop_intercepted():
+    """卡死检测:同名同参连续第 3 次调用被拦截,返回合成纠正结果。"""
+    agent, _ = make_agent([ACTION_JSON] * 10)                 # 一直要求调 weather
+    out = agent.run("查天气")                                  # 默认 max_rounds=8
+    assert "最大轮次" in out
+    tool_contents = [m.content for m in agent.session.messages if m.role == "tool"]
+    assert len(tool_contents) == 8                            # 每轮都有工具消息(第3次起是拦截结果)
+    assert "拦截" in tool_contents[2]                         # 第 3 次重复调用被拦截
+    assert "拦截" not in tool_contents[0]                     # 前两次正常执行

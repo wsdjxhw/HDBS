@@ -1,4 +1,5 @@
-"""session 与 context 管理测试:多窗口隔离、压缩、落盘恢复。"""
+"""session 与 context 管理测试:多窗口隔离、结构感知压缩、落盘恢复。"""
+import json
 import time
 
 from agent.context import (
@@ -31,16 +32,43 @@ def test_compress_truncates_and_keeps_first_user():
     out = compress_if_needed(s.messages, max_chars=4000)
     assert sum(len(m.content) for m in out) <= 4000
     assert "会话的目标" in out[0].content                     # 第一条 user 保住了
-    assert any("[已压缩]" in m.content for m in out)          # 旧工具结果被截断
-    assert any("已省略" in m.content for m in out)            # 有消息被丢弃时有提示
+    assert any("[已压缩]" in m.content for m in out)          # 非JSON内容被压缩时有标注
+    assert any("[历史摘要]" in m.content for m in out)        # 被丢弃的轮次有摘要,不是无声消失
+
+
+def test_compress_tool_output_stays_valid_json():
+    """核心回归:JSON 工具结果压缩后仍是合法 JSON,绝不出残缺片段。"""
+    s = Session("c")
+    s.append(USER, "查天气")
+    big = json.dumps({"city": "广州", "weather": "晴", "detail": "z" * 1000}, ensure_ascii=False)
+    s.append(TOOL, big, name="weather")
+    out = compress_if_needed(s.messages, max_chars=300)
+    tool = [m for m in out if m.role == "tool"][0]
+    data = json.loads(tool.content)                           # 能被解析 => 没有被剁残
+    assert data["_compressed"] is True
+    assert len(data["detail"]) <= 61                          # 超长字段被截短
+
+
+def test_compress_assistant_keeps_protocol_shape():
+    """assistant 历史压缩后仍是合法协议 JSON,只保留 thought/answer 摘要。"""
+    s = Session("c")
+    s.append(USER, "问")
+    long_reply = json.dumps({"thought": "t" * 400, "answer": "a" * 400}, ensure_ascii=False)
+    s.append(ASSISTANT, long_reply)
+    out = compress_if_needed(s.messages, max_chars=200)
+    asst = [m for m in out if m.role == "assistant"][0]
+    data = json.loads(asst.content)
+    assert "thought" in data
+    assert len(data.get("answer", "")) <= 101
 
 
 def test_compress_does_not_mutate_session():
     s = Session("c")
     s.append(TOOL, "y" * 2000)
-    before = len(s.messages[0].content)
+    before_content, before_meta = len(s.messages[0].content), dict(s.messages[0].meta)
     compress_if_needed(s.messages, max_chars=100)
-    assert len(s.messages[0].content) == before               # session 里保留完整历史
+    assert len(s.messages[0].content) == before_content       # session 里保留完整原文
+    assert s.messages[0].meta == before_meta                  # meta 也不被污染
 
 
 def test_compress_noop_when_short():

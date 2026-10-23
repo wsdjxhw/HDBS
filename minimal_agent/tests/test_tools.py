@@ -22,9 +22,29 @@ def test_unknown_tool():
     assert "weather" in data["available"]          # 把可用列表告诉 LLM,让它自己改
 
 
-def test_wrong_params():
-    r = default_registry().execute("weather", {})  # 缺 city
-    assert "参数不匹配" in json.loads(r)["error"]
+def test_missing_param_caught_by_validation():
+    """缺必填参数:执行前被 schema 校验拦下,错误里带上参数名和期望。"""
+    r = default_registry().execute("weather", {})
+    data = json.loads(r)
+    assert "参数校验失败" in data["error"]
+    assert "city" in data["error"]
+    assert "expect" in data                                   # 把期望 schema 告诉 LLM
+
+
+def test_typo_param_name_caught():
+    r = default_registry().execute("weather", {"ciy": "广州"})   # 参数名打错
+    assert "缺少必填参数 'city'" in json.loads(r)["error"]
+
+
+def test_wrong_type_caught():
+    r = default_registry().execute("weather", {"city": 123})     # 类型错
+    assert "应为 string" in json.loads(r)["error"]
+
+
+def test_bool_is_not_number():
+    """Python 的 bool 是 int 子类,校验必须显式排除,否则 num1=true 能混过去。"""
+    r = default_registry().execute("calculator", {"operation": "add", "num1": True, "num2": 1})
+    assert "应为 number" in json.loads(r)["error"]
 
 
 def test_unsupported_operation():
